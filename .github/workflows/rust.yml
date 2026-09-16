@@ -61,7 +61,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: otterlab-bio/enva
-          ref: bdea477885a90dec16874351a9f572feb8298a55
+          ref: 3559ddf7a5b46d3aee78c0f1a6222850ecbc8fa7
           path: .ci/enva
 
       - name: Install Rust toolchain
