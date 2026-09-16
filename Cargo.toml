@@ -1,0 +1,37 @@
+[package]
+name = "fastqcx"
+version = "0.3.4"
+authors = ["Felix Wiegand <fxwiegand@gmail.com>"]
+edition = "2018"
+license = "MIT"
+description = "A fast quality control tool for FASTQ files written in Rust"
+repository = "https://github.com/otterlab-bio/fastqcx"
+homepage = "https://github.com/otterlab-bio/fastqcx"
+keywords = ["fastq"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+needletail = "0.5.1"
+clap = "4.5"
+serde_json = "1.0.62"
+tera = "1.6.1"
+chrono = "0.4.19"
+rustc-hash = "1.1.0"
+itertools = "0.10.0"
+
+[lib]
+name = "fastqcx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fastqcx"
+path = "src/main.rs"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = 1
+
+[dev-dependencies]
+flate2 = "1.1.9"

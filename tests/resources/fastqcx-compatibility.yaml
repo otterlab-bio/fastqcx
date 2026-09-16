@@ -1,0 +1,7 @@
+name: fastqcx-compatibility
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - fastqc=0.12.1
+  - seqkit=2.13.0

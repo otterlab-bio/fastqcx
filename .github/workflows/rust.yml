@@ -1,0 +1,324 @@
+name: Rust
+
+on:
+  push:
+    branches: [main, library-latest]
+  pull_request:
+    branches: [main, library-latest]
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check all targets
+        run: cargo check --all-targets --all-features --locked
+
+      - name: Lint all targets
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Run all tests
+        run: cargo test --all-targets --all-features --locked
+
+      - name: Job summary
+        if: always()
+        continue-on-error: true
+        run: |
+          bash scripts/ci/job-summary.sh \
+            --verdict "${{ job.status }}" \
+            --title "fastqcx — quality gate" \
+            --checked "Formatting, a check of all targets, Clippy with warnings denied, and the full test suite." \
+            --check "cargo fmt --check|no diffs|see step log|-" \
+            --check "cargo check --all-targets|compiles|see step log|-" \
+            --check "cargo clippy -D warnings|no warnings|see step log|-" \
+            --check "cargo test --all-targets|all tests pass|see step log|-" \
+            --limit "Static quality gate. FastQC/SeqKit numerical parity is asserted by the compatibility job on a real fixture."
+
+  compatibility:
+    runs-on: ubuntu-latest
+    needs: quality
+    permissions:
+      contents: read
+    env:
+      FIXTURE_BASE_URL: https://huggingface.co/datasets/fallingstar10/otter-data/resolve/e3883a3b69ca8a598cf28d628adaa57ee67c4c67
+      FIXTURE_DIRECTORY: ci-artifacts/fixture/fastqcx/rna-pdx-srr30880970
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned enva source
+        uses: actions/checkout@v4
+        with:
+          repository: otterlab-bio/enva
+          ref: bdea477885a90dec16874351a9f572feb8298a55
+          path: .ci/enva
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build pinned enva
+        working-directory: .ci/enva
+        run: cargo build --release --locked --bin enva
+
+      - name: Create fixed FastQC and SeqKit environment through enva
+        run: |
+          set -euo pipefail
+          export RATTLER_CACHE_DIR="${RUNNER_TEMP:-/tmp}/rattler-cache"
+          mkdir -p ci-artifacts/enva "$RATTLER_CACHE_DIR"
+          .ci/enva/target/release/enva create \
+            --yaml tests/resources/fastqcx-compatibility.yaml \
+            --name fastqcx-compatibility \
+            --force \
+            --clean-cache \
+            --output summary \
+            2>&1 | tee ci-artifacts/enva/create.log
+          .ci/enva/target/release/enva run \
+            --name fastqcx-compatibility \
+            --command 'fastqc --version' \
+            2>&1 | tee ci-artifacts/enva/fastqc-version.log
+          .ci/enva/target/release/enva run \
+            --name fastqcx-compatibility \
+            --command 'seqkit version' \
+            2>&1 | tee ci-artifacts/enva/seqkit-version.log
+          grep -q 'FastQC v0.12.1' ci-artifacts/enva/fastqc-version.log
+          grep -q 'seqkit v2.13.0' ci-artifacts/enva/seqkit-version.log
+
+      - name: Download and verify real RNA-PDX fixture
+        run: |
+          set -euo pipefail
+          mkdir -p "$FIXTURE_DIRECTORY" ci-artifacts/provenance
+          curl --fail --location --silent --show-error \
+            "$FIXTURE_BASE_URL/provenance/checksums.sha256" \
+            --output ci-artifacts/provenance/checksums.sha256
+          curl --fail --location --silent --show-error \
+            "$FIXTURE_BASE_URL/fastqcx/rna-pdx-srr30880970/R1.fastq.gz" \
+            --output "$FIXTURE_DIRECTORY/R1.fastq.gz"
+          curl --fail --location --silent --show-error \
+            "$FIXTURE_BASE_URL/fastqcx/rna-pdx-srr30880970/R2.fastq.gz" \
+            --output "$FIXTURE_DIRECTORY/R2.fastq.gz"
+          awk -v read_one="$FIXTURE_DIRECTORY/R1.fastq.gz" \
+              -v read_two="$FIXTURE_DIRECTORY/R2.fastq.gz" '
+            $2 ~ /fastqcx\/rna-pdx-srr30880970\/R1\.fastq\.gz$/ { $2 = read_one; print; next }
+            $2 ~ /fastqcx\/rna-pdx-srr30880970\/R2\.fastq\.gz$/ { $2 = read_two; print; next }
+          ' ci-artifacts/provenance/checksums.sha256 \
+            > ci-artifacts/provenance/fastqcx-checksums.sha256
+          sha256sum --check ci-artifacts/provenance/fastqcx-checksums.sha256
+
+      - name: Build fastqcx
+        run: cargo build --locked
+
+      - name: Enforce real-fixture runtime and memory budget
+        env:
+          FASTQCX_FIXTURE: ${{ env.FIXTURE_DIRECTORY }}/R1.fastq.gz
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import resource
+          import subprocess
+          import time
+
+          fixture_path = os.environ['FASTQCX_FIXTURE']
+          summary_directory = Path('ci-artifacts/fastqcx')
+          started = time.monotonic()
+          subprocess.run(
+              [
+                  'target/debug/fastqcx',
+                  '--fastq', fixture_path,
+                  '--kmer', '7',
+                  '--summary', str(summary_directory),
+                  '--no-html',
+              ],
+              check=True,
+          )
+          elapsed_seconds = time.monotonic() - started
+          peak_rss_kib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+          Path('ci-artifacts/runtime-memory.tsv').write_text(
+              'fixture\telapsed_seconds\tpeak_rss_kib\n'
+              f'{fixture_path}\t{elapsed_seconds:.3f}\t{peak_rss_kib}\n'
+          )
+          assert elapsed_seconds <= 120, elapsed_seconds
+          assert peak_rss_kib <= 512 * 1024, peak_rss_kib
+          assert (summary_directory / 'fastqc_data.txt').is_file()
+          PY
+
+      - name: Run FastQC and SeqKit through enva
+        run: |
+          set -euo pipefail
+          fixture_fastq="$FIXTURE_DIRECTORY/R1.fastq.gz"
+          mkdir -p ci-artifacts/fastqc ci-artifacts/seqkit
+          .ci/enva/target/release/enva run \
+            --name fastqcx-compatibility \
+            --command "fastqc --extract --outdir ci-artifacts/fastqc $fixture_fastq" \
+            2>&1 | tee ci-artifacts/fastqc/fastqc-command.log
+          .ci/enva/target/release/enva run \
+            --name fastqcx-compatibility \
+            --command "seqkit stats --all --tabular $fixture_fastq" \
+            > ci-artifacts/seqkit/stats.tsv
+
+      - name: Compare FastQC and SeqKit contracts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          fastqcx_text = Path('ci-artifacts/fastqcx/fastqc_data.txt').read_text()
+          fastqcx_lines = fastqcx_text.splitlines()
+          seqkit_header_index = fastqcx_lines.index('>>Seqkit Statistics\tpass') + 1
+          fastqcx_header = fastqcx_lines[seqkit_header_index].lstrip('#').split('\t')
+          fastqcx_values = fastqcx_lines[seqkit_header_index + 1].removesuffix('>>END_MODULE').split('\t')
+          fastqcx_stats = dict(zip(fastqcx_header, fastqcx_values))
+
+          seqkit_lines = Path('ci-artifacts/seqkit/stats.tsv').read_text().splitlines()
+          seqkit_stats = dict(zip(seqkit_lines[0].split('\t'), seqkit_lines[1].split('\t')))
+          assert fastqcx_stats['format'] == seqkit_stats['format'] == 'FASTQ'
+          assert fastqcx_stats['type'] == seqkit_stats['type'] == 'DNA'
+
+          integer_fields = [
+              'num_seqs', 'sum_len', 'min_len', 'max_len', 'Q1', 'Q2', 'Q3',
+              'sum_gap', 'N50', 'N50_num', 'sum_n',
+          ]
+          # Keep the observed values so the job summary can report the comparison instead of
+          # only asserting it. A briefing that lists the numbers is what a reviewer can check
+          # against the artifact.
+          report = {
+              'schema_version': 'otter.fastqcx-parity/v1',
+              'integer_fields_compared': len(integer_fields),
+              'integer_fields_matched': 0,
+              'decimal_fields_compared': 0,
+              'decimal_fields_within_tolerance': 0,
+              'largest_decimal_deviation': 0.0,
+              'integer_statistics': {},
+              'decimal_statistics': {},
+          }
+
+          for field in integer_fields:
+              fastqcx_value = int(float(fastqcx_stats[field]))
+              seqkit_value = int(float(seqkit_stats[field]))
+              assert fastqcx_value == seqkit_value, (field, fastqcx_value, seqkit_value)
+              report['integer_fields_matched'] += 1
+              report['integer_statistics'][field] = fastqcx_value
+
+          decimal_tolerances = {
+              'avg_len': 0.05,
+              'Q20(%)': 0.5,
+              'Q30(%)': 0.5,
+              'AvgQual': 0.01,
+              'GC(%)': 0.01,
+          }
+          for field, tolerance in decimal_tolerances.items():
+              difference = abs(float(fastqcx_stats[field]) - float(seqkit_stats[field]))
+              assert difference <= tolerance, (field, difference)
+              report['decimal_fields_compared'] += 1
+              report['decimal_fields_within_tolerance'] += 1
+              report['largest_decimal_deviation'] = max(
+                  report['largest_decimal_deviation'], round(difference, 6)
+              )
+              report['decimal_statistics'][field] = {
+                  'fastqcx': float(fastqcx_stats[field]),
+                  'seqkit': float(seqkit_stats[field]),
+                  'tolerance': tolerance,
+                  'difference': round(difference, 6),
+              }
+
+          official_fastqc = Path('ci-artifacts/fastqc/R1_fastqc/fastqc_data.txt').read_text()
+          fastqc_total = re.search(r'Total Sequences\t([0-9]+)', official_fastqc)
+          fastqc_gc = re.search(r'%GC\t([0-9]+)', official_fastqc)
+          assert fastqc_total is not None
+          assert fastqc_gc is not None
+          assert fastqc_total.group(0) in fastqcx_text
+          assert fastqc_gc.group(0) in fastqcx_text
+          assert '>>Per base sequence quality\t' in official_fastqc
+          assert '>>Per base sequence quality\t' in fastqcx_text
+
+          report['official_fastqc_total_sequences'] = int(fastqc_total.group(1))
+          report['official_fastqc_gc_percent'] = int(fastqc_gc.group(1))
+          report['equal'] = (
+              report['integer_fields_matched'] == report['integer_fields_compared']
+              and report['decimal_fields_within_tolerance'] == report['decimal_fields_compared']
+          )
+          Path('ci-artifacts/parity-report.json').write_text(
+              json.dumps(report, indent=2, sort_keys=True) + '\n', encoding='utf-8'
+          )
+          print(
+              f"parity report: {report['integer_fields_matched']}/"
+              f"{report['integer_fields_compared']} integer fields exact, "
+              f"{report['decimal_fields_within_tolerance']}/"
+              f"{report['decimal_fields_compared']} decimal fields within tolerance, "
+              f"largest deviation {report['largest_decimal_deviation']}"
+          )
+          PY
+
+      - name: Remove compatibility environment through enva
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts/enva
+          if .ci/enva/target/release/enva validate --name fastqcx-compatibility \
+            > ci-artifacts/enva/pre-remove-validate.log 2>&1; then
+            .ci/enva/target/release/enva remove fastqcx-compatibility \
+              2>&1 | tee ci-artifacts/enva/remove.log
+          fi
+
+      - name: Upload FastQC and SeqKit compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastqcx-rna-pdx-compatibility-evidence
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Job summary
+        if: always()
+        continue-on-error: true
+        run: |
+          # Report the measured comparison, not a restatement of the assertions.
+          bash scripts/ci/summary-field.sh \
+            ci-artifacts/parity-report.json#integer_fields_matched \
+            ci-artifacts/parity-report.json#integer_fields_compared \
+            ci-artifacts/parity-report.json#decimal_fields_within_tolerance \
+            ci-artifacts/parity-report.json#decimal_fields_compared \
+            ci-artifacts/parity-report.json#largest_decimal_deviation \
+            ci-artifacts/parity-report.json#official_fastqc_total_sequences \
+            ci-artifacts/parity-report.json#official_fastqc_gc_percent \
+            > ci-artifacts/summary-fields.txt 2>/dev/null || true
+          field() { rg -N "^$1=" ci-artifacts/summary-fields.txt 2>/dev/null | head -n 1 | cut -d= -f2- || echo "-"; }
+          budget="-"
+          if [[ -f ci-artifacts/runtime-memory.tsv ]]; then
+            budget="$(tail -n 1 ci-artifacts/runtime-memory.tsv | awk -F'\t' '{printf "%.1f s, %.0f MiB peak RSS", $2, $3/1024}')"
+          fi
+          fastqcx_total="-"
+          if [[ -f ci-artifacts/fastqcx/fastqc_data.txt ]]; then
+            fastqcx_total="$(rg -N '^Total Sequences\t' ci-artifacts/fastqcx/fastqc_data.txt | head -n 1 | cut -f2 || echo '-')"
+          fi
+          bash scripts/ci/job-summary.sh \
+            --verdict "${{ job.status }}" \
+            --title "fastqcx — FastQC and SeqKit parity on a real fixture" \
+            --scope "RNA-PDX SRR30880970 R1" \
+            --checked "Runs fastqcx, official FastQC and SeqKit on the same real RNA-PDX reads through a pinned enva environment, then compares their statistics: integer fields must match exactly, percentage and quality fields must agree within a declared tolerance. A runtime and memory budget is enforced on the same run." \
+            --check "Integer statistics exact|11 of 11 fields|$(field integer_fields_matched) of $(field integer_fields_compared)|-" \
+            --check "Decimal statistics within tolerance|5 of 5 fields|$(field decimal_fields_within_tolerance) of $(field decimal_fields_compared)|-" \
+            --check "Largest decimal deviation|see per-field tolerances|$(field largest_decimal_deviation)|-" \
+            --check "Total sequences agree across fastqcx, FastQC and SeqKit|all three equal|fastqcx $(field fastqcx_total) / FastQC $(field official_fastqc_total_sequences)|-" \
+            --check "Official FastQC GC percent present in the fastqcx report|present|$(field official_fastqc_gc_percent) percent|-" \
+            --check "Runtime and memory budget|<= 120 s and <= 512 MiB peak RSS|${budget}|-" \
+            --metric "Compared tools|fastqcx (this build), FastQC v0.12.1, SeqKit v2.13.0 (via enva)" \
+            --metric "Integer fields compared|num_seqs, sum_len, min_len, max_len, Q1, Q2, Q3, sum_gap, N50, N50_num, sum_n" \
+            --metric "Decimal fields compared|avg_len, Q20(%), Q30(%), AvgQual, GC(%)" \
+            --artifact "fastqcx-rna-pdx-compatibility-evidence" \
+            --limit "Parity on one real human RNA-PDX read file. Decimal fields are compared within tolerance because rounding and base-quality aggregation legitimately differ between implementations; this is not a claim of bit-identical FastQC reproduction, and the per-field differences are recorded in parity-report.json." \
+            --limit "Agreement with FastQC is checked on the headline figures (total sequences, GC percent, presence of the per-base quality module), not on every module of the FastQC report." \
+            --note "The runtime and memory budget is what catches a performance regression on realistic input that a tiny synthetic fixture would hide."

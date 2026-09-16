@@ -1,0 +1,48 @@
+##FastQC	{{ version }}
+>>Basic Statistics	pass
+#Measure	Value	
+Filename	{{ filename }}
+File type	Conventional base calls
+Encoding	Sanger / Illumina 1.9
+Total Sequences	{{ reads }}
+Filtered Sequences	0	
+Sequence length	{{ avg_read_length }}
+%GC	{{ avg_gc }}
+>>END_MODULE
+>>Per base sequence quality	{{ base_quality_warn }}
+#Base	Mean	Median	Lower Quartile	Upper Quartile	10th Percentile	90th Percentile
+{% for entry in bpp_data %}{{ entry.pos }}	{{ entry.average }}	{{ entry.median }}	{{ entry.q1 }}	{{ entry.q3 }}	{{ entry.lower }}	{{ entry.upper }}
+{% endfor %}>>END_MODULE
+>>Per sequence quality scores	pass
+#Quality	Count
+{% for entry in mean_read_quality_data %}{{ entry.score}}	{{ entry.count }}
+{% endfor %}>>END_MODULE
+>>Per base sequence content	{{ base_warning }}
+#Base	G	A	T	C
+{% for entry in base_count %}{{ entry.pos }}	{{ entry.base_map["G"] }}	{{ entry.base_map["A"] }}	{{ entry.base_map["T"] }}	{{ entry.base_map["C"] }}
+{% endfor %}>>END_MODULE
+>>Per base GC content	pass
+#Base	%GC
+{% for entry in gc_per_base %}{{ entry.pos }}	{{ entry.pct }}
+{% endfor %}>>END_MODULE
+>>Per sequence GC content	pass
+#GC Content	Count
+{% for entry in gc_data %}{{ entry.gc_pct}}	{{ entry.count}}
+{% endfor %}>>END_MODULE
+>>Per base N content	{{ n_warn }}
+#Base	N-Count
+{% for entry in base_count %}{{ entry.pos }}	{{ entry.base_map["N"] }}
+{% endfor %}>>END_MODULE
+>>Sequence Length Distribution	{{ read_length_warn }}
+#Length	Count
+{% for entry in read_lengths %}{{ entry.length }}	{{ entry.count }}
+{% endfor %}>>END_MODULE
+>>Overrepresented sequences	pass
+>>END_MODULE
+>>Kmer Content	{{ overly_represented_warn }}
+{% if overly_represented %}#Sequence	Count	Percentage
+{% for entry in overly_represented %}{{ entry.k_mer}}	{{ entry.count}}	{{ entry.pct}}
+{% endfor %}{% endif %}>>END_MODULE
+>>Seqkit Statistics	pass
+#file	format	type	num_seqs	sum_len	min_len	avg_len	max_len	Q1	Q2	Q3	sum_gap	N50	N50_num	Q20(%)	Q30(%)	AvgQual	GC(%)	sum_n
+{{ filename }}	{{ seqkit_format }}	{{ seqkit_type }}	{{ reads }}	{{ sum_len }}	{{ min_len }}	{{ avg_read_length }}	{{ max_len }}	{{ q1 | round(method="common", precision=0) }}	{{ q2 | round(method="common", precision=0) }}	{{ q3 | round(method="common", precision=0) }}	{{ sum_gap }}	{{ n50 }}	{{ n50_num }}	{{ q20_pct | round(method="common", precision=0) }}	{{ q30_pct | round(method="common", precision=0) }}	{{ avg_qual | round(method="common", precision=2) }}	{{ seqkit_gc | round(method="common", precision=2) }}	{{ sum_n }}>>END_MODULE
