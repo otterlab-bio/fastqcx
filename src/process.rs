@@ -748,14 +748,21 @@ mod test {
     use std::convert::TryFrom;
     use std::fs;
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMPORARY_PATH: AtomicU64 = AtomicU64::new(0);
 
     fn temporary_path(extension: &str) -> std::path::PathBuf {
         let unique_suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("fastqcx-{unique_suffix}.{extension}"))
+        let sequence = NEXT_TEMPORARY_PATH.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "fastqcx-{}-{unique_suffix}-{sequence}.{extension}",
+            std::process::id()
+        ))
     }
 
     fn temporary_fastq(contents: &str) -> std::path::PathBuf {

@@ -40,6 +40,22 @@ claim to reproduce every FastQC implementation detail.
 - GC content
 - Sequence quality score summaries
 
+## Limits and input validation
+
+Whole-file totals (reads, bases, GC, quality summaries) are always complete.
+Per-position charts are bounded by a tracking limit (default: the first
+10,000 positions per read; `AnalysisLimits` in the library API): positions
+beyond the bound are excluded from per-base charts only, and the HTML report
+flags when the bound was hit. The bound is a library-level knob and is not
+currently exposed as a CLI flag.
+
+Inputs are validated fail-closed:
+
+- Quality bytes must be within the supported Phred+33 range (`!` through `~`). The parser cannot infer an encoding when byte ranges overlap.
+- Empty FASTQ files and empty sequences are rejected.
+- Reads longer than 10,000,000 bases or more than 100,000 distinct read lengths are rejected.
+- `-k/--kmer` accepts 1–7.
+
 ## Install
 
 Build from source. `fastqcx` is not published to crates.io, so `cargo install fastqcx` fails with
