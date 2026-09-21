@@ -43,7 +43,7 @@ jobs:
             --check "cargo check --all-targets|compiles|see step log|-" \
             --check "cargo clippy -D warnings|no warnings|see step log|-" \
             --check "cargo test --all-targets|all tests pass|see step log|-" \
-            --limit "Static quality gate. FastQC/SeqKit numerical parity is asserted by the compatibility job on a real fixture."
+            --limit "Static quality gate. The compatibility job separately checks declared SeqKit fields and three FastQC modules on a real fixture."
 
   compatibility:
     runs-on: ubuntu-latest
@@ -169,97 +169,11 @@ jobs:
 
       - name: Compare FastQC and SeqKit contracts
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import json
-          import re
-
-          fastqcx_text = Path('ci-artifacts/fastqcx/fastqc_data.txt').read_text()
-          fastqcx_lines = fastqcx_text.splitlines()
-          seqkit_header_index = fastqcx_lines.index('>>Seqkit Statistics\tpass') + 1
-          fastqcx_header = fastqcx_lines[seqkit_header_index].lstrip('#').split('\t')
-          fastqcx_values = fastqcx_lines[seqkit_header_index + 1].removesuffix('>>END_MODULE').split('\t')
-          fastqcx_stats = dict(zip(fastqcx_header, fastqcx_values))
-
-          seqkit_lines = Path('ci-artifacts/seqkit/stats.tsv').read_text().splitlines()
-          seqkit_stats = dict(zip(seqkit_lines[0].split('\t'), seqkit_lines[1].split('\t')))
-          assert fastqcx_stats['format'] == seqkit_stats['format'] == 'FASTQ'
-          assert fastqcx_stats['type'] == seqkit_stats['type'] == 'DNA'
-
-          integer_fields = [
-              'num_seqs', 'sum_len', 'min_len', 'max_len', 'Q1', 'Q2', 'Q3',
-              'sum_gap', 'N50', 'N50_num', 'sum_n',
-          ]
-          # Keep the observed values so the job summary can report the comparison instead of
-          # only asserting it. A briefing that lists the numbers is what a reviewer can check
-          # against the artifact.
-          report = {
-              'schema_version': 'otter.fastqcx-parity/v1',
-              'integer_fields_compared': len(integer_fields),
-              'integer_fields_matched': 0,
-              'decimal_fields_compared': 0,
-              'decimal_fields_within_tolerance': 0,
-              'largest_decimal_deviation': 0.0,
-              'integer_statistics': {},
-              'decimal_statistics': {},
-          }
-
-          for field in integer_fields:
-              fastqcx_value = int(float(fastqcx_stats[field]))
-              seqkit_value = int(float(seqkit_stats[field]))
-              assert fastqcx_value == seqkit_value, (field, fastqcx_value, seqkit_value)
-              report['integer_fields_matched'] += 1
-              report['integer_statistics'][field] = fastqcx_value
-
-          decimal_tolerances = {
-              'avg_len': 0.05,
-              'Q20(%)': 0.5,
-              'Q30(%)': 0.5,
-              'AvgQual': 0.01,
-              'GC(%)': 0.01,
-          }
-          for field, tolerance in decimal_tolerances.items():
-              difference = abs(float(fastqcx_stats[field]) - float(seqkit_stats[field]))
-              assert difference <= tolerance, (field, difference)
-              report['decimal_fields_compared'] += 1
-              report['decimal_fields_within_tolerance'] += 1
-              report['largest_decimal_deviation'] = max(
-                  report['largest_decimal_deviation'], round(difference, 6)
-              )
-              report['decimal_statistics'][field] = {
-                  'fastqcx': float(fastqcx_stats[field]),
-                  'seqkit': float(seqkit_stats[field]),
-                  'tolerance': tolerance,
-                  'difference': round(difference, 6),
-              }
-
-          official_fastqc = Path('ci-artifacts/fastqc/R1_fastqc/fastqc_data.txt').read_text()
-          fastqc_total = re.search(r'Total Sequences\t([0-9]+)', official_fastqc)
-          fastqc_gc = re.search(r'%GC\t([0-9]+)', official_fastqc)
-          assert fastqc_total is not None
-          assert fastqc_gc is not None
-          assert fastqc_total.group(0) in fastqcx_text
-          assert fastqc_gc.group(0) in fastqcx_text
-          assert '>>Per base sequence quality\t' in official_fastqc
-          assert '>>Per base sequence quality\t' in fastqcx_text
-
-          report['official_fastqc_total_sequences'] = int(fastqc_total.group(1))
-          report['official_fastqc_gc_percent'] = int(fastqc_gc.group(1))
-          report['equal'] = (
-              report['integer_fields_matched'] == report['integer_fields_compared']
-              and report['decimal_fields_within_tolerance'] == report['decimal_fields_compared']
-          )
-          Path('ci-artifacts/parity-report.json').write_text(
-              json.dumps(report, indent=2, sort_keys=True) + '\n', encoding='utf-8'
-          )
-          print(
-              f"parity report: {report['integer_fields_matched']}/"
-              f"{report['integer_fields_compared']} integer fields exact, "
-              f"{report['decimal_fields_within_tolerance']}/"
-              f"{report['decimal_fields_compared']} decimal fields within tolerance, "
-              f"largest deviation {report['largest_decimal_deviation']}"
-          )
-          PY
+          python3 scripts/compare_fastqc_seqkit.py \
+            --fastqcx-summary ci-artifacts/fastqcx/fastqc_data.txt \
+            --fastqc-summary ci-artifacts/fastqc/R1_fastqc/fastqc_data.txt \
+            --seqkit-stats ci-artifacts/seqkit/stats.tsv \
+            --output ci-artifacts/parity-report.json
 
       - name: Remove compatibility environment through enva
         if: always()
@@ -294,6 +208,12 @@ jobs:
             ci-artifacts/parity-report.json#largest_decimal_deviation \
             ci-artifacts/parity-report.json#official_fastqc_total_sequences \
             ci-artifacts/parity-report.json#official_fastqc_gc_percent \
+            ci-artifacts/parity-report.json#fastqc_per_base_values_compared \
+            ci-artifacts/parity-report.json#fastqc_per_base_maximum_difference \
+            ci-artifacts/parity-report.json#fastqc_duplication_levels_compared \
+            ci-artifacts/parity-report.json#fastqc_duplication_maximum_difference \
+            ci-artifacts/parity-report.json#fastqc_overrepresented_sequences_compared \
+            ci-artifacts/parity-report.json#fastqc_overrepresented_maximum_difference \
             > ci-artifacts/summary-fields.txt 2>/dev/null || true
           field() { rg -N "^$1=" ci-artifacts/summary-fields.txt 2>/dev/null | head -n 1 | cut -d= -f2- || echo "-"; }
           budget="-"
@@ -308,17 +228,17 @@ jobs:
             --verdict "${{ job.status }}" \
             --title "fastqcx — FastQC and SeqKit parity on a real fixture" \
             --scope "RNA-PDX SRR30880970 R1" \
-            --checked "Runs fastqcx, official FastQC and SeqKit on the same real RNA-PDX reads through a pinned enva environment, then compares their statistics: integer fields must match exactly, percentage and quality fields must agree within a declared tolerance. A runtime and memory budget is enforced on the same run." \
-            --check "Integer statistics exact|11 of 11 fields|$(field integer_fields_matched) of $(field integer_fields_compared)|-" \
-            --check "Decimal statistics within tolerance|5 of 5 fields|$(field decimal_fields_within_tolerance) of $(field decimal_fields_compared)|-" \
-            --check "Largest decimal deviation|see per-field tolerances|$(field largest_decimal_deviation)|-" \
+            --checked "Runs fastqcx, FastQC v0.12.1, and SeqKit v2.13.0 on the same real RNA-PDX reads. SeqKit fields use exact or declared-tolerance comparisons; FastQC comparisons cover per-base quality values, duplication levels, and overrepresented-sequence identities, counts, percentages, and module verdicts." \
+            --check "SeqKit integer statistics exact|11 of 11 fields|$(field integer_fields_matched) of $(field integer_fields_compared)|-" \
+            --check "SeqKit decimal statistics within tolerance|5 of 5 fields|$(field decimal_fields_within_tolerance) of $(field decimal_fields_compared)|-" \
+            --check "FastQC per-base quality values|all grouped values within 0.01|$(field fastqc_per_base_values_compared) values, max difference $(field fastqc_per_base_maximum_difference)|-" \
+            --check "FastQC sequence duplication levels|all levels and deduplicated percentage within 0.01|$(field fastqc_duplication_levels_compared) levels, max difference $(field fastqc_duplication_maximum_difference)|-" \
+            --check "FastQC overrepresented sequences|identities and counts exact; percentages within 0.01|$(field fastqc_overrepresented_sequences_compared) sequences, max difference $(field fastqc_overrepresented_maximum_difference)|-" \
             --check "Total sequences agree across fastqcx, FastQC and SeqKit|all three equal|fastqcx $(field fastqcx_total) / FastQC $(field official_fastqc_total_sequences)|-" \
-            --check "Official FastQC GC percent present in the fastqcx report|present|$(field official_fastqc_gc_percent) percent|-" \
             --check "Runtime and memory budget|<= 120 s and <= 512 MiB peak RSS|${budget}|-" \
             --metric "Compared tools|fastqcx (this build), FastQC v0.12.1, SeqKit v2.13.0 (via enva)" \
-            --metric "Integer fields compared|num_seqs, sum_len, min_len, max_len, Q1, Q2, Q3, sum_gap, N50, N50_num, sum_n" \
-            --metric "Decimal fields compared|avg_len, Q20(%), Q30(%), AvgQual, GC(%)" \
+            --metric "SeqKit fields|11 integer fields and 5 decimal fields" \
+            --metric "FastQC modules|Per base sequence quality, Sequence Duplication Levels, Overrepresented sequences" \
             --artifact "fastqcx-rna-pdx-compatibility-evidence" \
-            --limit "Parity on one real human RNA-PDX read file. Decimal fields are compared within tolerance because rounding and base-quality aggregation legitimately differ between implementations; this is not a claim of bit-identical FastQC reproduction, and the per-field differences are recorded in parity-report.json." \
-            --limit "Agreement with FastQC is checked on the headline figures (total sequences, GC percent, presence of the per-base quality module), not on every module of the FastQC report." \
-            --note "The runtime and memory budget is what catches a performance regression on realistic input that a tiny synthetic fixture would hide."
+            --limit "Parity is established on one real human RNA-PDX read file for the explicitly listed fields and modules. Adapter content, per-tile quality, and other FastQC-only modules remain outside this comparison." \
+            --note "parity-report.json records every tolerance and maximum observed deviation; raw fastqcx, FastQC, and SeqKit outputs are retained with the workflow artifact."

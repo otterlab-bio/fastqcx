@@ -36,6 +36,8 @@ claim to reproduce every FastQC implementation detail.
 - Read length distribution
 - Per-base sequence quality
 - Per-base sequence content
+- Sequence duplication levels using FastQC's bounded 50-base identity contract
+- FastQC-style overrepresented sequence identities under the same bounded identity contract
 - K-mer content
 - GC content
 - Sequence quality score summaries
@@ -113,6 +115,23 @@ done
 - HTML is written to standard output unless `--no-html` is supplied.
 - `--summary` creates a FastQC-compatible summary directory for MultiQC and `qctb` consumers.
 - Compatibility labels such as FastQC and SeqKit remain external protocol names; `fastqcx` does not claim to reproduce every FastQC implementation detail.
+
+## Compatibility evidence
+
+The GitHub Actions compatibility job runs `fastqcx`, FastQC 0.12.1, and SeqKit 2.13.0 on the
+same pinned RNA-PDX `SRR30880970` R1 fixture. The retained evidence compares:
+
+- 11 SeqKit integer fields exactly and 5 decimal fields within declared field-specific tolerances;
+- every grouped FastQC per-base quality value (mean, median, quartiles, and 10th/90th percentiles)
+  after applying FastQC's position bins;
+- all 16 FastQC sequence-duplication bins and the total deduplicated percentage; and
+- overrepresented sequence identities and counts exactly, with percentages within 0.01 percentage
+  points.
+
+Module verdicts must also agree. The resulting `otter.fastqcx-parity/v2` JSON report and all three
+raw outputs are uploaded as the `fastqcx-rna-pdx-compatibility-evidence` workflow artifact. This
+contract is deliberately narrower than complete FastQC equivalence: adapter content, per-tile
+quality, and other unlisted FastQC modules remain outside the validated surface.
 
 ## Development
 
