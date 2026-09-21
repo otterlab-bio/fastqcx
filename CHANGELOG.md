@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## [Unreleased]
+### Added
+- FastQC-compatible sequence-duplication and overrepresented-sequence modules.
+- Real-fixture parity evidence for per-base quality and duplication levels against FastQC 0.12.1, plus a deterministic positive control for non-empty overrepresented-sequence comparison.
+
 ## [0.3.2] - 2022-06-07
 ### Changed
 - Update dependencies

@@ -161,3 +161,69 @@ fn cli_rejects_unbounded_kmer_length() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("expected 1..=7"));
 }
+
+#[test]
+fn summary_reports_fastqc_style_duplication_and_overrepresented_sequences() {
+    let fixture = temporary_path("duplication.fastq");
+    let summary_directory = temporary_path("duplication-summary");
+    let shared_prefix = "A".repeat(50);
+    let records = [
+        format!("{shared_prefix}{}", "C".repeat(30)),
+        format!("{shared_prefix}{}", "G".repeat(30)),
+        "C".repeat(80),
+        "G".repeat(80),
+    ];
+    let mut fastq = String::new();
+    for (index, sequence) in records.iter().enumerate() {
+        fastq.push_str(&format!(
+            "@read-{index}\n{sequence}\n+\n{}\n",
+            "I".repeat(sequence.len())
+        ));
+    }
+    fs::write(&fixture, fastq).expect("fixture should be written");
+
+    let output = run_fastqcx(&[
+        "--fastq",
+        fixture.to_str().expect("fixture path should be UTF-8"),
+        "--summary",
+        summary_directory
+            .to_str()
+            .expect("summary path should be UTF-8"),
+        "--no-html",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let summary = fs::read_to_string(summary_directory.join("fastqc_data.txt"))
+        .expect("summary should be published");
+    assert!(
+        summary.contains(">>Sequence Duplication Levels\t"),
+        "summary must expose FastQC's duplication-level module"
+    );
+    assert!(
+        summary.contains("#Total Deduplicated Percentage\t75"),
+        "three distinct sequence identities across four reads yield 75% deduplicated reads"
+    );
+    assert!(
+        summary.contains("1\t50"),
+        "two singleton reads account for half of all reads"
+    );
+    assert!(
+        summary.contains("2\t50"),
+        "the two long reads sharing their first 50 bases account for half of all reads"
+    );
+    assert!(
+        summary.contains(">>Overrepresented sequences\t"),
+        "summary must expose FastQC's overrepresented-sequences module"
+    );
+    assert!(
+        summary.contains(&format!("{shared_prefix}\t2\t50")),
+        "FastQC's 50-base identity rule must group long reads before reporting them"
+    );
+
+    fs::remove_file(fixture).expect("fixture should be removable");
+    fs::remove_dir_all(summary_directory).expect("summary should be removable");
+}

@@ -23,6 +23,10 @@ const C: usize = 1;
 const G: usize = 2;
 const T: usize = 3;
 const N: usize = 4;
+const FASTQC_SEQUENCE_IDENTITY_LENGTH: usize = 50;
+const FASTQC_SEQUENCE_TRACKING_LIMIT: usize = 100_000;
+const FASTQC_OVERREPRESENTED_WARN_PERCENT: f64 = 0.1;
+const FASTQC_OVERREPRESENTED_FAIL_PERCENT: f64 = 1.0;
 
 fn base_index(base: u8) -> usize {
     match base {
@@ -88,6 +92,104 @@ fn histogram_value_at_index(histogram: &[usize], target_index: usize) -> usize {
         }
     }
     histogram.len().saturating_sub(1)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DuplicationMetrics {
+    deduplicated_percentage: f64,
+    levels: [f64; 16],
+}
+
+fn corrected_identity_count(
+    count_at_limit: u64,
+    total_count: u64,
+    duplication_level: u64,
+    observations: u64,
+) -> f64 {
+    if count_at_limit == total_count || total_count.saturating_sub(observations) < count_at_limit {
+        return observations as f64;
+    }
+
+    let observations = observations as f64;
+    let limit_of_caring = 1.0 - observations / (observations + 0.01);
+    let mut probability_not_seen = 1.0;
+    for index in 0..count_at_limit {
+        let remaining = (total_count - index) as f64;
+        probability_not_seen *= (remaining - duplication_level as f64) / remaining;
+        if probability_not_seen < limit_of_caring {
+            probability_not_seen = 0.0;
+            break;
+        }
+    }
+
+    let probability_seen = 1.0 - probability_not_seen;
+    if probability_seen <= 0.0 {
+        observations
+    } else {
+        observations / probability_seen
+    }
+}
+
+fn duplication_slot(duplication_level: u64) -> usize {
+    match duplication_level.saturating_sub(1) {
+        value if value > 9_999 => 15,
+        value if value > 4_999 => 14,
+        value if value > 999 => 13,
+        value if value > 499 => 12,
+        value if value > 99 => 11,
+        value if value > 49 => 10,
+        value if value > 9 => 9,
+        value => value as usize,
+    }
+}
+
+fn duplication_metrics(
+    sequence_identity_counts: &HashMap<Vec<u8>, u64>,
+    count_at_limit: u64,
+    total_count: u64,
+) -> DuplicationMetrics {
+    let mut identities_per_level = HashMap::default();
+    for duplication_level in sequence_identity_counts.values() {
+        *identities_per_level
+            .entry(*duplication_level)
+            .or_insert(0_u64) += 1;
+    }
+
+    let mut deduplicated_total = 0.0;
+    let mut raw_total = 0.0;
+    let mut levels = [0.0; 16];
+    for (duplication_level, observations) in identities_per_level {
+        let corrected =
+            corrected_identity_count(count_at_limit, total_count, duplication_level, observations);
+        deduplicated_total += corrected;
+        let represented_reads = corrected * duplication_level as f64;
+        raw_total += represented_reads;
+        levels[duplication_slot(duplication_level)] += represented_reads;
+    }
+
+    if raw_total == 0.0 {
+        return DuplicationMetrics {
+            deduplicated_percentage: 100.0,
+            levels,
+        };
+    }
+    for percentage in &mut levels {
+        *percentage = *percentage / raw_total * 100.0;
+    }
+    DuplicationMetrics {
+        deduplicated_percentage: deduplicated_total / raw_total * 100.0,
+        levels,
+    }
+}
+
+fn module_status(value: f64, warning_boundary: f64, failure_boundary: f64) -> &'static str {
+    if value < failure_boundary {
+        "fail"
+    } else if value < warning_boundary {
+        "warn"
+    } else {
+        "pass"
+    }
 }
 
 fn sequence_length_summary(
@@ -231,6 +333,9 @@ pub fn analyze_with_options<P: AsRef<Path> + AsRef<OsStr>>(
     let mut kmers = HashMap::default();
     let mut gc_content = vec![0_usize; 101];
     let mut quality_totals = QualityTotals::default();
+    let mut sequence_identity_counts: HashMap<Vec<u8>, u64> = HashMap::default();
+    let mut sequence_count_at_identity_limit = 0_u64;
+    let mut sequence_tracking_frozen = false;
     let mut total_length_bases = 0_u64;
     let mut read_count = 0_u64;
     let mut positions_truncated = false;
@@ -294,6 +399,24 @@ pub fn analyze_with_options<P: AsRef<Path> + AsRef<OsStr>>(
             .ok_or(FastqAnalysisError::CountOverflow {
                 resource: "GC histogram",
             })?;
+
+        let identity_length = sequence_length.min(FASTQC_SEQUENCE_IDENTITY_LENGTH);
+        let sequence_identity = sequence[..identity_length].to_vec();
+        if let Some(count) = sequence_identity_counts.get_mut(&sequence_identity) {
+            *count = count
+                .checked_add(1)
+                .ok_or(FastqAnalysisError::CountOverflow {
+                    resource: "sequence identity",
+                })?;
+            if !sequence_tracking_frozen {
+                sequence_count_at_identity_limit = record_number;
+            }
+        } else if !sequence_tracking_frozen {
+            sequence_identity_counts.insert(sequence_identity, 1);
+            sequence_count_at_identity_limit = record_number;
+            sequence_tracking_frozen =
+                sequence_identity_counts.len() == FASTQC_SEQUENCE_TRACKING_LIMIT;
+        }
 
         let mut read_quality_sum = 0_u64;
         for (position, &encoded_quality) in qualities.iter().enumerate() {
@@ -432,6 +555,8 @@ pub fn analyze_with_options<P: AsRef<Path> + AsRef<OsStr>>(
         kmer_counts: kmers,
         mean_read_qualities,
         quality_totals,
+        sequence_identity_counts,
+        sequence_count_at_identity_limit,
         positions_truncated,
         kmer_length: options.kmer_length,
     })
@@ -455,6 +580,8 @@ pub fn process<P: AsRef<Path> + AsRef<OsStr>>(
     let kmers = &analysis.kmer_counts;
     let mean_read_qualities = &analysis.mean_read_qualities;
     let quality_totals = analysis.quality_totals;
+    let sequence_identity_counts = &analysis.sequence_identity_counts;
+    let sequence_count_at_identity_limit = analysis.sequence_count_at_identity_limit;
     let base_totals = analysis.base_totals;
     let exact_n_bases = analysis.exact_n_bases;
     let gap_bases = analysis.gap_bases;
@@ -584,6 +711,56 @@ pub fn process<P: AsRef<Path> + AsRef<OsStr>>(
     let mut counter_specs: Value = serde_json::from_str(include_str!("report/counter_specs.json"))?;
     counter_specs["data"]["values"] = json!(kmer_data);
 
+    let duplication = duplication_metrics(
+        sequence_identity_counts,
+        sequence_count_at_identity_limit,
+        read_count,
+    );
+    let duplication_status = module_status(duplication.deduplicated_percentage, 70.0, 50.0);
+    let duplication_labels = [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", ">10", ">50", ">100", ">500", ">1k", ">5k",
+        ">10k+",
+    ];
+    let duplication_levels = duplication_labels
+        .iter()
+        .zip(duplication.levels)
+        .map(|(level, percentage)| json!({"level": level, "percentage": percentage}))
+        .collect::<Vec<_>>();
+
+    let mut overrepresented_sequences = sequence_identity_counts
+        .iter()
+        .filter_map(|(sequence, count)| {
+            let percentage = *count as f64 / read_count as f64 * 100.0;
+            (percentage > FASTQC_OVERREPRESENTED_WARN_PERCENT).then(|| {
+                json!({
+                    "sequence": String::from_utf8_lossy(sequence),
+                    "count": count,
+                    "percentage": percentage,
+                    "source": "No Hit",
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    overrepresented_sequences.sort_by(|left, right| {
+        right["percentage"]
+            .as_f64()
+            .partial_cmp(&left["percentage"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left["sequence"].as_str().cmp(&right["sequence"].as_str()))
+    });
+    let maximum_overrepresented_percentage = overrepresented_sequences
+        .first()
+        .and_then(|entry| entry["percentage"].as_f64())
+        .unwrap_or(0.0);
+    let overrepresented_status =
+        if maximum_overrepresented_percentage > FASTQC_OVERREPRESENTED_FAIL_PERCENT {
+            "fail"
+        } else if maximum_overrepresented_percentage > FASTQC_OVERREPRESENTED_WARN_PERCENT {
+            "warn"
+        } else {
+            "pass"
+        };
+
     // Data for GC content
     let mut gc_data = Vec::new();
     // TODO(lhepler): I had to add this filter to get the same histogram in the output report
@@ -705,6 +882,14 @@ pub fn process<P: AsRef<Path> + AsRef<OsStr>>(
         context.insert("gc_per_base", &gc_content_per_base);
         context.insert("overly_represented", &overly_represented);
         context.insert("overly_represented_warn", &overly_represented_warn);
+        context.insert("duplication_status", &duplication_status);
+        context.insert(
+            "deduplicated_percentage",
+            &duplication.deduplicated_percentage,
+        );
+        context.insert("duplication_levels", &duplication_levels);
+        context.insert("overrepresented_status", &overrepresented_status);
+        context.insert("overrepresented_sequences", &overrepresented_sequences);
         context.insert("n_warn", &n_warn);
         context.insert("base_quality_warn", &base_quality_warn);
 

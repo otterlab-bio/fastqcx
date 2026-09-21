@@ -169,6 +169,11 @@ pub struct FastqAnalysisResult {
     pub kmer_counts: FxHashMap<Vec<u8>, u64>,
     pub mean_read_qualities: FxHashMap<u64, u64>,
     pub quality_totals: QualityTotals,
+    /// Counts of FastQC-compatible sequence identities. Reads longer than 50 bases
+    /// are represented by their first 50 bases and at most 100,000 distinct
+    /// identities are retained, matching FastQC's bounded-memory contract.
+    pub sequence_identity_counts: FxHashMap<Vec<u8>, u64>,
+    pub sequence_count_at_identity_limit: u64,
     pub positions_truncated: bool,
     pub kmer_length: KmerLength,
 }

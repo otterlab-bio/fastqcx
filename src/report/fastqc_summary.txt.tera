@@ -37,8 +37,15 @@ Sequence length	{{ avg_read_length }}
 #Length	Count
 {% for entry in read_lengths %}{{ entry.length }}	{{ entry.count }}
 {% endfor %}>>END_MODULE
->>Overrepresented sequences	pass
->>END_MODULE
+>>Sequence Duplication Levels	{{ duplication_status }}
+#Total Deduplicated Percentage	{{ deduplicated_percentage }}
+#Duplication Level	Percentage of total
+{% for entry in duplication_levels %}{{ entry.level }}	{{ entry.percentage }}
+{% endfor %}>>END_MODULE
+>>Overrepresented sequences	{{ overrepresented_status }}
+{% if overrepresented_sequences %}#Sequence	Count	Percentage	Possible Source
+{% for entry in overrepresented_sequences %}{{ entry.sequence }}	{{ entry.count }}	{{ entry.percentage }}	{{ entry.source }}
+{% endfor %}{% endif %}>>END_MODULE
 >>Kmer Content	{{ overly_represented_warn }}
 {% if overly_represented %}#Sequence	Count	Percentage
 {% for entry in overly_represented %}{{ entry.k_mer}}	{{ entry.count}}	{{ entry.pct}}
