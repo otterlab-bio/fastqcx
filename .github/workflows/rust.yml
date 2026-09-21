@@ -198,7 +198,12 @@ jobs:
           records.extend(sequence_identity(index) + "C" * 30 for index in range(1, 401))
           lines = []
           for index, sequence in enumerate(records):
-              lines.extend((f"@positive-{index}", sequence, "+", "I" * len(sequence)))
+              # A single low Phred+33 value removes FastQC's otherwise ambiguous
+              # interpretation of an all-`I` synthetic quality alphabet as Phred+64.
+              quality = "I" * len(sequence)
+              if index == 0:
+                  quality = "!" + quality[1:]
+              lines.extend((f"@positive-{index}", sequence, "+", quality))
           Path("ci-artifacts/positive-control/positive.fastq").write_text(
               "\n".join(lines) + "\n", encoding="utf-8"
           )
