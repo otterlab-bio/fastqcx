@@ -175,6 +175,53 @@ jobs:
             --seqkit-stats ci-artifacts/seqkit/stats.tsv \
             --output ci-artifacts/parity-report.json
 
+      - name: Exercise non-empty duplication and overrepresentation controls
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            ci-artifacts/positive-control/fastqcx \
+            ci-artifacts/positive-control/fastqc \
+            ci-artifacts/positive-control/seqkit
+          python3 - <<'PY'
+          from pathlib import Path
+
+          alphabet = "ACGT"
+
+          def sequence_identity(value: int) -> str:
+              bases = []
+              for _ in range(50):
+                  bases.append(alphabet[value % len(alphabet)])
+                  value //= len(alphabet)
+              return "".join(bases)
+
+          records = ["A" * 80] * 600
+          records.extend(sequence_identity(index) + "C" * 30 for index in range(1, 401))
+          lines = []
+          for index, sequence in enumerate(records):
+              lines.extend((f"@positive-{index}", sequence, "+", "I" * len(sequence)))
+          Path("ci-artifacts/positive-control/positive.fastq").write_text(
+              "\n".join(lines) + "\n", encoding="utf-8"
+          )
+          PY
+          target/debug/fastqcx \
+            --fastq ci-artifacts/positive-control/positive.fastq \
+            --kmer 7 \
+            --summary ci-artifacts/positive-control/fastqcx \
+            --no-html
+          .ci/enva/target/release/enva run \
+            --name fastqcx-compatibility \
+            --command 'fastqc --extract --outdir ci-artifacts/positive-control/fastqc ci-artifacts/positive-control/positive.fastq'
+          .ci/enva/target/release/enva run \
+            --name fastqcx-compatibility \
+            --command 'seqkit stats --all --tabular ci-artifacts/positive-control/positive.fastq' \
+            > ci-artifacts/positive-control/seqkit/stats.tsv
+          python3 scripts/compare_fastqc_seqkit.py \
+            --fastqcx-summary ci-artifacts/positive-control/fastqcx/fastqc_data.txt \
+            --fastqc-summary ci-artifacts/positive-control/fastqc/positive_fastqc/fastqc_data.txt \
+            --seqkit-stats ci-artifacts/positive-control/seqkit/stats.tsv \
+            --output ci-artifacts/positive-control/parity-report.json \
+            --require-overrepresented
+
       - name: Remove compatibility environment through enva
         if: always()
         run: |
@@ -224,21 +271,37 @@ jobs:
           if [[ -f ci-artifacts/fastqcx/fastqc_data.txt ]]; then
             fastqcx_total="$(rg -N '^Total Sequences\t' ci-artifacts/fastqcx/fastqc_data.txt | head -n 1 | cut -f2 || echo '-')"
           fi
+          positive_overrepresented="-"
+          positive_duplication="-"
+          if [[ -f ci-artifacts/positive-control/parity-report.json ]]; then
+            read -r positive_overrepresented positive_duplication < <(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("ci-artifacts/positive-control/parity-report.json").read_text())
+          print(
+              report["fastqc_overrepresented_sequences_compared"],
+              report["fastqc_modules"]["sequence_duplication_levels"]["deduplicated_percentage"],
+          )
+          PY
+            )
+          fi
           bash scripts/ci/job-summary.sh \
             --verdict "${{ job.status }}" \
             --title "fastqcx — FastQC and SeqKit parity on a real fixture" \
-            --scope "RNA-PDX SRR30880970 R1" \
+            --scope "RNA-PDX SRR30880970 R1 plus a deterministic duplicated-read positive control" \
             --checked "Runs fastqcx, FastQC v0.12.1, and SeqKit v2.13.0 on the same real RNA-PDX reads. SeqKit fields use exact or declared-tolerance comparisons; FastQC comparisons cover per-base quality values, duplication levels, and overrepresented-sequence identities, counts, percentages, and module verdicts." \
             --check "SeqKit integer statistics exact|11 of 11 fields|$(field integer_fields_matched) of $(field integer_fields_compared)|-" \
             --check "SeqKit decimal statistics within tolerance|5 of 5 fields|$(field decimal_fields_within_tolerance) of $(field decimal_fields_compared)|-" \
             --check "FastQC per-base quality values|all grouped values within 0.01|$(field fastqc_per_base_values_compared) values, max difference $(field fastqc_per_base_maximum_difference)|-" \
             --check "FastQC sequence duplication levels|all levels and deduplicated percentage within 0.01|$(field fastqc_duplication_levels_compared) levels, max difference $(field fastqc_duplication_maximum_difference)|-" \
             --check "FastQC overrepresented sequences|identities and counts exact; percentages within 0.01|$(field fastqc_overrepresented_sequences_compared) sequences, max difference $(field fastqc_overrepresented_maximum_difference)|-" \
+            --check "FastQC positive control|at least one overrepresented sequence; identities/counts exact|${positive_overrepresented} sequences, ${positive_duplication}% deduplicated|-" \
             --check "Total sequences agree across fastqcx, FastQC and SeqKit|all three equal|fastqcx $(field fastqcx_total) / FastQC $(field official_fastqc_total_sequences)|-" \
             --check "Runtime and memory budget|<= 120 s and <= 512 MiB peak RSS|${budget}|-" \
             --metric "Compared tools|fastqcx (this build), FastQC v0.12.1, SeqKit v2.13.0 (via enva)" \
             --metric "SeqKit fields|11 integer fields and 5 decimal fields" \
             --metric "FastQC modules|Per base sequence quality, Sequence Duplication Levels, Overrepresented sequences" \
             --artifact "fastqcx-rna-pdx-compatibility-evidence" \
-            --limit "Parity is established on one real human RNA-PDX read file for the explicitly listed fields and modules. Adapter content, per-tile quality, and other FastQC-only modules remain outside this comparison." \
+            --limit "Parity is established on one real human RNA-PDX read file plus a deterministic positive control for duplication and overrepresentation, limited to the explicitly listed fields and modules. Adapter content, per-tile quality, and other FastQC-only modules remain outside this comparison." \
             --note "parity-report.json records every tolerance and maximum observed deviation; raw fastqcx, FastQC, and SeqKit outputs are retained with the workflow artifact."

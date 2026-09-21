@@ -119,14 +119,16 @@ done
 ## Compatibility evidence
 
 The GitHub Actions compatibility job runs `fastqcx`, FastQC 0.12.1, and SeqKit 2.13.0 on the
-same pinned RNA-PDX `SRR30880970` R1 fixture. The retained evidence compares:
+same pinned RNA-PDX `SRR30880970` R1 fixture. A deterministic duplicated-read positive control
+additionally requires a non-empty overrepresented-sequence result from both implementations. The
+retained evidence compares:
 
 - 11 SeqKit integer fields exactly and 5 decimal fields within declared field-specific tolerances;
 - every grouped FastQC per-base quality value (mean, median, quartiles, and 10th/90th percentiles)
   after applying FastQC's position bins;
 - all 16 FastQC sequence-duplication bins and the total deduplicated percentage; and
 - overrepresented sequence identities and counts exactly, with percentages within 0.01 percentage
-  points.
+  points, including the non-empty positive control.
 
 Module verdicts must also agree. The resulting `otter.fastqcx-parity/v2` JSON report and all three
 raw outputs are uploaded as the `fastqcx-rna-pdx-compatibility-evidence` workflow artifact. This

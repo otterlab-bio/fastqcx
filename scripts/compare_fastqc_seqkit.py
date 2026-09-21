@@ -270,6 +270,7 @@ def main() -> None:
     parser.add_argument("--fastqc-summary", type=Path, required=True)
     parser.add_argument("--seqkit-stats", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--require-overrepresented", action="store_true")
     arguments = parser.parse_args()
 
     fastqcx_text = arguments.fastqcx_summary.read_text()
@@ -292,6 +293,10 @@ def main() -> None:
             fastqcx_modules, fastqc_modules
         ),
     }
+    if arguments.require_overrepresented:
+        assert (
+            fastqc_module_results["overrepresented_sequences"]["sequences_compared"] > 0
+        ), "positive control did not produce an overrepresented sequence"
     report = {
         "schema_version": "otter.fastqcx-parity/v2",
         **seqkit,
@@ -316,6 +321,7 @@ def main() -> None:
         "fastqc_overrepresented_maximum_difference": fastqc_module_results[
             "overrepresented_sequences"
         ]["maximum_difference"],
+        "overrepresented_sequences_required": arguments.require_overrepresented,
         "equal": True,
     }
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
